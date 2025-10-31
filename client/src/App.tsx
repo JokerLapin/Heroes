@@ -37,16 +37,25 @@ export default function App() {
   })
 
   // Overlay SVG chargé et transformé
-  const overlayWrapRef = useRef<HTMLDivElement>(null)  // wrapper transformé (scale + translate)
-  const svgRef = useRef<SVGSVGElement | null>(null)    // svg inline inséré
+  const overlayWrapRef = useRef<HTMLDivElement>(null)   // wrapper transformé (scaleX/scaleY + translate)
+  const svgRef = useRef<SVGSVGElement | null>(null)     // svg inline inséré
   const [hexCenters, setHexCenters] = useState<Array<{cx:number, cy:number}>>([])
   const [hexCount, setHexCount] = useState(0)
 
   // Contrôles d’alignement (persistés)
-  const [scale, setScale] = useState<number>(() => Number(localStorage.getItem('heroes.ov.scale')) || 1)
-  const [offX, setOffX]   = useState<number>(() => Number(localStorage.getItem('heroes.ov.offX')) || 0)
-  const [offY, setOffY]   = useState<number>(() => Number(localStorage.getItem('heroes.ov.offY')) || 0)
-  useEffect(() => { localStorage.setItem('heroes.ov.scale', String(scale)) }, [scale])
+  // Rétro-compatibilité : si ancien 'heroes.ov.scale' existe, on l’utilise comme valeur de départ pour X et Y.
+  const legacyScale = Number(localStorage.getItem('heroes.ov.scale')) || undefined
+  const [scaleX, setScaleX] = useState<number>(() =>
+    (legacyScale && !isNaN(legacyScale)) ? legacyScale : (Number(localStorage.getItem('heroes.ov.scaleX')) || 1)
+  )
+  const [scaleY, setScaleY] = useState<number>(() =>
+    (legacyScale && !isNaN(legacyScale)) ? legacyScale : (Number(localStorage.getItem('heroes.ov.scaleY')) || 1)
+  )
+  const [offX, setOffX] = useState<number>(() => Number(localStorage.getItem('heroes.ov.offX')) || 0)
+  const [offY, setOffY] = useState<number>(() => Number(localStorage.getItem('heroes.ov.offY')) || 0)
+
+  useEffect(() => { localStorage.setItem('heroes.ov.scaleX', String(scaleX)) }, [scaleX])
+  useEffect(() => { localStorage.setItem('heroes.ov.scaleY', String(scaleY)) }, [scaleY])
   useEffect(() => { localStorage.setItem('heroes.ov.offX', String(offX)) }, [offX])
   useEffect(() => { localStorage.setItem('heroes.ov.offY', String(offY)) }, [offY])
 
@@ -68,7 +77,7 @@ export default function App() {
     }
   }, [])
 
-  // Chargement du SVG (on l'inline pour pouvoir ajouter des handlers et lire les bboxes)
+  // Chargement du SVG (inline) pour attacher les handlers et lire les bboxes
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -98,7 +107,7 @@ export default function App() {
         polys.forEach((poly, index) => {
           poly.setAttribute('data-index', String(index))
           poly.setAttribute('stroke-width', '1')
-          poly.style.cursor = 'pointer'
+          ;(poly as SVGElement).style.cursor = 'pointer'
           poly.addEventListener('mouseenter', () => poly.setAttribute('stroke-width', '2'))
           poly.addEventListener('mouseleave', () => poly.setAttribute('stroke-width', '1'))
           poly.addEventListener('click', () => {
@@ -120,7 +129,7 @@ export default function App() {
       }
     })()
     return () => { cancelled = true }
-  }, [joined]) // recharge quand on rejoint (même room)
+  }, [joined]) // recharge quand on rejoint
 
   // Join + end turn
   const handleJoin = (e: React.FormEvent) => {
@@ -136,9 +145,12 @@ export default function App() {
   )
   const endTurn = () => state.roomId && socket.emit('endTurn', { roomId: state.roomId })
 
+  // Style transform commun (pour SVG et marqueurs)
+  const overlayTransform = `translate(${offX}px, ${offY}px) scale(${scaleX}, ${scaleY})`
+
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16 }}>
-      <h1 style={{ marginTop: 0 }}>Heroes — Overlay SVG alignable (échelle + X/Y)</h1>
+      <h1 style={{ marginTop: 0 }}>Heroes — Overlay SVG (échelle X/Y + offset)</h1>
       <p>Socket: {connected ? '✅ connecté' : '❌ déconnecté'} · ID: {mySocketId || '...'}</p>
 
       {!joined ? (
@@ -158,24 +170,24 @@ export default function App() {
             {/* Image du plateau */}
             <img src="/assets/board.png" alt="Plateau" style={{ display:'block', width:'100%', height:'auto' }} />
 
-            {/* Wrapper transformé qui contient le SVG inline + les marqueurs */}
+            {/* Wrapper transformé qui contient le SVG inline */}
             <div
               ref={overlayWrapRef}
               style={{
                 position:'absolute',
                 inset:0,
-                transform:`translate(${offX}px, ${offY}px) scale(${scale})`,
+                transform: overlayTransform,
                 transformOrigin:'top left',
                 pointerEvents:'auto'
               }}
             />
 
-            {/* Marqueurs de sélection (dans le même wrapper transformé) */}
+            {/* Marqueurs de sélection (mêmes transform pour rester alignés) */}
             <svg
               style={{
                 position:'absolute',
                 inset:0,
-                transform:`translate(${offX}px, ${offY}px) scale(${scale})`,
+                transform: overlayTransform,
                 transformOrigin:'top left',
                 width:'100%',
                 height:'100%',
@@ -219,14 +231,30 @@ export default function App() {
 
             <div style={{ marginTop: 16 }}>
               <h3>Alignement overlay</h3>
-              <div style={{fontSize:12, color:'#555'}}>Échelle: {scale.toFixed(2)}</div>
-              <input type="range" min="0.5" max="2.0" step="0.01" value={scale} onChange={e=>setScale(Number(e.target.value))} />
+              <div style={{fontSize:12, color:'#555'}}>Échelle X: {scaleX.toFixed(3)}</div>
+              <input
+                type="range"
+                min="0.5"
+                max="2.0"
+                step="0.001"
+                value={scaleX}
+                onChange={e=>setScaleX(Number(e.target.value))}
+              />
+              <div style={{fontSize:12, color:'#555', marginTop:8}}>Échelle Y: {scaleY.toFixed(3)}</div>
+              <input
+                type="range"
+                min="0.5"
+                max="2.0"
+                step="0.001"
+                value={scaleY}
+                onChange={e=>setScaleY(Number(e.target.value))}
+              />
               <div style={{fontSize:12, color:'#555', marginTop:8}}>Décalage X: {offX}px</div>
-              <input type="range" min="-400" max="400" step="1" value={offX} onChange={e=>setOffX(Number(e.target.value))} />
+              <input type="range" min="-600" max="600" step="1" value={offX} onChange={e=>setOffX(Number(e.target.value))} />
               <div style={{fontSize:12, color:'#555', marginTop:8}}>Décalage Y: {offY}px</div>
-              <input type="range" min="-400" max="400" step="1" value={offY} onChange={e=>setOffY(Number(e.target.value))} />
+              <input type="range" min="-600" max="600" step="1" value={offY} onChange={e=>setOffY(Number(e.target.value))} />
               <p style={{fontSize:12, color:'#666', marginTop:8}}>
-                Ajuste ces valeurs pour que les <i>polygones</i> du SVG coïncident exactement avec les hex du PNG.
+                Ajuste X/Y pour corriger l’étirement anisotrope (différences d’échelle horizontale vs verticale).
               </p>
               <p style={{ fontSize:12, color:'#666' }}>
                 Hex détectés dans le SVG : <b>{hexCount}</b>
