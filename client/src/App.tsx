@@ -193,7 +193,7 @@ export default function App() {
           <div ref={containerRef} style={{ position:'relative', width:'100%', maxWidth: 1100, userSelect:'none' }}>
             {/* Ton PNG du plateau (mets-le dans client/public/assets/board.png) */}
             <img
-              src="/assets/board.png"
+              src="/client/public/assets/board.png"
               alt="Plateau"
               style={{ display:'block', width:'100%', height:'auto' }}
               onLoad={() => {
