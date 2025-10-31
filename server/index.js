@@ -9,18 +9,12 @@ const io = new Server(server, { cors: { origin: '*' } })
 const PORT = process.env.PORT || 3000
 
 /**
- * Room structure:
- * {
- *   id: string,
- *   players: Map<socketId, { id, name, seat }>,
- *   order: string[],
- *   turnIndex: number,
- *   board: {
- *     rows: number,
- *     cols: number,
- *     selections: Map<socketId, { r:number, c:number }>
- *   }
- * }
+ * Room:
+ * - id
+ * - players: Map<socketId, {id,name,seat}>
+ * - order: string[] (ordre de tour)
+ * - turnIndex: number
+ * - board: { selections: Map<socketId, { index:number }> } // index = polygon du SVG
  */
 const rooms = new Map()
 
@@ -31,11 +25,7 @@ function getOrCreateRoom(roomId) {
       players: new Map(),
       order: [],
       turnIndex: 0,
-      board: {
-        rows: 13,
-        cols: 13,
-        selections: new Map()
-      }
+      board: { selections: new Map() },
     })
   }
   return rooms.get(roomId)
@@ -47,10 +37,9 @@ function publicState(room) {
     players: Array.from(room.players.values()).sort((a, b) => a.seat - b.seat),
     currentPlayerId: room.order.length ? room.order[room.turnIndex % room.order.length] : null,
     board: {
-      rows: room.board.rows,
-      cols: room.board.cols,
-      selections: Array.from(room.board.selections.entries()).map(([playerId, cell]) => ({
-        playerId, r: cell.r, c: cell.c
+      selections: Array.from(room.board.selections.entries()).map(([playerId, v]) => ({
+        playerId,
+        index: v.index
       }))
     }
   }
@@ -62,14 +51,11 @@ function broadcast(roomId) {
   io.to(roomId).emit('state:update', publicState(room))
 }
 
-// Static client
 const publicDir = path.join(__dirname, 'public')
 app.use(express.static(publicDir))
 app.get('*', (_, res) => res.sendFile(path.join(publicDir, 'index.html')))
 
-// Sockets
 io.on('connection', (socket) => {
-  // JOIN
   socket.on('joinRoom', ({ roomId, name }) => {
     try {
       if (!roomId || !name) return
@@ -89,12 +75,9 @@ io.on('connection', (socket) => {
         room.players.get(socket.id).name = name
       }
       broadcast(roomId)
-    } catch (e) {
-      console.error('joinRoom error', e)
-    }
+    } catch (e) { console.error('joinRoom error', e) }
   })
 
-  // END TURN
   socket.on('endTurn', ({ roomId }) => {
     try {
       const room = rooms.get(roomId)
@@ -103,30 +86,25 @@ io.on('connection', (socket) => {
       if (current !== socket.id) return
       room.turnIndex = (room.turnIndex + 1) % room.order.length
       broadcast(roomId)
-    } catch (e) {
-      console.error('endTurn error', e)
-    }
+    } catch (e) { console.error('endTurn error', e) }
   })
 
-  // SELECT CELL
-  socket.on('selectCell', ({ roomId, r, c }) => {
+  // Nouvelle API: sélection par index de polygon du SVG
+  socket.on('selectCell', ({ roomId, index }) => {
     try {
       const room = rooms.get(roomId)
       if (!room) return
-      const rr = Number(r), cc = Number(c)
-      if (!Number.isInteger(rr) || !Number.isInteger(cc)) return
-      if (rr < 0 || cc < 0 || rr >= room.board.rows || cc >= room.board.cols) return
-      room.board.selections.set(socket.id, { r: rr, c: cc })
+      const idx = Number(index)
+      if (!Number.isInteger(idx) || idx < 0) return
+      room.board.selections.set(socket.id, { index: idx })
       broadcast(roomId)
-    } catch (e) {
-      console.error('selectCell error', e)
-    }
+    } catch (e) { console.error('selectCell error', e) }
   })
 
-  // DISCONNECT
   socket.on('disconnect', () => {
     for (const [roomId, room] of rooms.entries()) {
       if (!room.players.has(socket.id)) continue
+
       const wasCurrent = room.order.length
         ? room.order[room.turnIndex % room.order.length] === socket.id
         : false
@@ -140,7 +118,7 @@ io.on('connection', (socket) => {
         if (room.order.length === 0) { rooms.delete(roomId); continue }
         if (idx < room.turnIndex) room.turnIndex -= 1
         if (room.turnIndex >= room.order.length) room.turnIndex = 0
-        if (wasCurrent) { /* turnIndex pointe déjà sur le suivant */ }
+        if (wasCurrent) { /* no-op, pointe déjà sur le suivant */ }
       }
       broadcast(roomId)
     }
