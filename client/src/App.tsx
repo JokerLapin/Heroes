@@ -191,9 +191,9 @@ export default function App() {
         <section style={{ display:'grid', gridTemplateColumns:'1fr 320px', gap:16, alignItems:'start' }}>
           {/* Board */}
           <div ref={containerRef} style={{ position:'relative', width:'100%', maxWidth: 1100, userSelect:'none' }}>
-            {/* Ton PNG du plateau (mets-le dans client/public/assets/board.png) */}
+            {/* Ton PNG du plateau */}
             <img
-              src="/client/public/assets/board.png"
+              src="/assets/board.png"
               alt="Plateau"
               style={{ display:'block', width:'100%', height:'auto' }}
               onLoad={() => {
@@ -281,9 +281,6 @@ export default function App() {
                 Échelle: {scale.toFixed(2)}
               </label>
               <input type="range" min="0.6" max="2.0" step="0.01" value={scale} onChange={e=>setScale(Number(e.target.value))} />
-              <p style={{ fontSize:12, color:'#666' }}>
-                Utilise ces réglages pour superposer la grille cliquable sur les hex du PNG.
-              </p>
             </div>
 
             <div style={{ marginTop: 16 }}>
