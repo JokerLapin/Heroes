@@ -3,8 +3,8 @@
 "private": true,
 "engines": { "node": ">=18" },
 "scripts": {
-"postinstall": "npm --prefix client ci --no-audit --no-fund || true && npm --prefix server ci --no-audit --no-fund || true",
-"build": "npm --prefix client run build && rm -rf server/public && mkdir -p server/public && cp -R client/dist/* server/public/",
-"start": "node server/index.js"
+    "postinstall": "echo \"(optional)\"",
+    "build": "npm --prefix client install --no-audit --no-fund && npm --prefix server install --no-audit --no-fund && npm --prefix client run build && rm -rf server/public && mkdir -p server/public && cp -R client/dist/* server/public/",
+    "start": "node server/index.js"
 }
 }
