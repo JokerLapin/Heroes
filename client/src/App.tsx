@@ -27,6 +27,14 @@ function colorFor(id: string) {
 }
 type ActionMode = 'ping' | 'move'
 
+function median(nums: number[]) {
+  const a = [...nums].sort((x, y) => x - y)
+  const n = a.length
+  if (n === 0) return 0
+  const mid = Math.floor(n / 2)
+  return n % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2
+}
+
 export default function App() {
   const [connected, setConnected] = useState(false)
   const [mySocketId, setMySocketId] = useState('')
@@ -44,8 +52,11 @@ export default function App() {
   const containerRef = useRef<HTMLDivElement>(null)
   const overlayWrapRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
+
+  // Les hex filtrés + centres (dans le repère natif du SVG)
   const [hexCenters, setHexCenters] = useState<Array<{cx:number, cy:number}>>([])
   const [hexCount, setHexCount] = useState(0)
+
   const [containerSize, setContainerSize] = useState<{w:number, h:number}>({w:0, h:0})
   const [nativeSize, setNativeSize] = useState<{w:number, h:number}>({w:0, h:0})
 
@@ -56,7 +67,7 @@ export default function App() {
   const [debugOverlay, setDebugOverlay] = useState(false)
   const [lastClick, setLastClick] = useState<number | null>(null)
 
-  // Responsive measure
+  // Responsive measure du conteneur image
   useEffect(() => {
     if (!containerRef.current) return
     const el = containerRef.current
@@ -106,7 +117,7 @@ export default function App() {
     })()
   }, [])
 
-  // Charge le SVG inline et rend cliquables <polygon> ET <path>
+  // Charge le SVG inline, filtre les VRAIS hex, ordonne, attache les clics
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -134,18 +145,17 @@ export default function App() {
         inlineSvg.style.width = '100%'
         inlineSvg.style.height = '100%'
 
-        // Injecte
+        // Injecte dans le DOM
         const wrap = overlayWrapRef.current
         if (!wrap) return
         wrap.innerHTML = ''
         wrap.appendChild(inlineSvg)
         svgRef.current = inlineSvg
 
-        // Récupère TOUTES les formes candidates (paths + polygons)
-        // On va filtrer : visible, bbox non vide, pas dans <defs>/<mask>
+        // Récupère toutes les formes candidates (paths + polygons)
         const allShapes = Array.from(inlineSvg.querySelectorAll<SVGGraphicsElement>('polygon, path'))
 
-        // Aide : savoir si un node est sous <defs> ou <mask>
+        // Exclure les éléments invisibles / techniques (<defs>, <mask>, etc.)
         const isInHiddenContainer = (el: Element) => {
           let p: Element | null = el
           while (p) {
@@ -156,33 +166,72 @@ export default function App() {
           return false
         }
 
-        const hexEls: SVGGraphicsElement[] = []
-        allShapes.forEach(el => {
-          if (isInHiddenContainer(el)) return
+        // 1) Filtrage initial : visible + bbox non nul
+        const withBox = allShapes.map(el => {
+          if (isInHiddenContainer(el)) return null
           let box: DOMRect
-          try { box = el.getBBox() } catch { return }
-          if (!box || box.width === 0 || box.height === 0) return
-          hexEls.push(el)
+          try { box = el.getBBox() } catch { return null }
+          if (!box || box.width === 0 || box.height === 0) return null
+          return { el, box }
+        }).filter(Boolean) as Array<{el: SVGGraphicsElement, box: DOMRect}>
+
+        // 2) Filtre par ratio ~ hex flat-top (h/w ≈ 0.866)
+        const targetRatio = 0.866 // = sqrt(3)/2
+        const ratioTol = 0.12     // ±12%
+        const ratioFiltered = withBox.filter(({ box }) => {
+          const r = box.height / box.width
+          return r > targetRatio * (1 - ratioTol) && r < targetRatio * (1 + ratioTol)
         })
 
-        // Attache listeners / styles
-        hexEls.forEach((shape, index) => {
-          shape.setAttribute('data-index', String(index))
+        // 3) Filtre par taille proche de la médiane (évite les grosses zones/artefacts)
+        const widths = ratioFiltered.map(x => x.box.width)
+        const heights = ratioFiltered.map(x => x.box.height)
+        const medW = median(widths)
+        const medH = median(heights)
+        const sizeTol = 0.18 // ±18%
+        const sizeFiltered = ratioFiltered.filter(({ box }) =>
+          box.width  > medW * (1 - sizeTol) && box.width  < medW * (1 + sizeTol) &&
+          box.height > medH * (1 - sizeTol) && box.height < medH * (1 + sizeTol)
+        )
 
-          // Force capture clic même si fill="none"
-          const fill = shape.getAttribute('fill')
-          if (!fill || fill === 'none') shape.setAttribute('fill', 'rgba(0,0,0,0)')
-          ;(shape as SVGElement).style.pointerEvents = 'all'
+        // 4) Ordonner en lignes (top→bottom) puis colonnes (left→right)
+        // On groupe les éléments par "ligne" à tolérance verticale
+        const sorted = [...sizeFiltered].sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x)
+        const rowGap = medH * 0.6 // tolérance verticale pour regrouper
+        const rows: Array<Array<{el: SVGGraphicsElement, box: DOMRect}>> = []
+        for (const item of sorted) {
+          const lastRow = rows[rows.length - 1]
+          if (!lastRow) {
+            rows.push([item])
+            continue
+          }
+          const lastY = lastRow[0].box.y
+          if (Math.abs(item.box.y - lastY) <= rowGap) {
+            lastRow.push(item)
+          } else {
+            rows.push([item])
+          }
+        }
+        rows.forEach(row => row.sort((a, b) => a.box.x - b.box.x))
+        const hexList = rows.flat()
 
-          // Un peu de stroke par défaut (utile en debug)
-          if (!shape.getAttribute('stroke')) shape.setAttribute('stroke', 'rgba(0,0,0,0.35)')
-          shape.addEventListener('mouseenter', () => {
-            if (debugOverlay) shape.setAttribute('stroke', 'rgba(0,0,0,0.8)')
+        // 5) Attacher les listeners au bon index (après tri !), styliser pour clic/hover
+        hexList.forEach(({ el }, index) => {
+          el.setAttribute('data-index', String(index))
+          // fill transparent pour capter le clic
+          const fill = el.getAttribute('fill')
+          if (!fill || fill === 'none') el.setAttribute('fill', 'rgba(0,0,0,0)')
+          ;(el as SVGElement).style.pointerEvents = 'all'
+          // stroke léger en debug
+          if (!el.getAttribute('stroke')) el.setAttribute('stroke', 'rgba(0,0,0,0.35)')
+
+          el.addEventListener('mouseenter', () => {
+            if (debugOverlay) el.setAttribute('stroke', 'rgba(0,0,0,0.8)')
           })
-          shape.addEventListener('mouseleave', () => {
-            if (debugOverlay) shape.setAttribute('stroke', 'rgba(0,0,0,0.35)')
+          el.addEventListener('mouseleave', () => {
+            if (debugOverlay) el.setAttribute('stroke', 'rgba(0,0,0,0.35)')
           })
-          shape.addEventListener('click', () => {
+          el.addEventListener('click', () => {
             const rId = state.roomId || ''
             if (!rId) return
             console.log('[Heroes] click hex #', index)
@@ -192,22 +241,20 @@ export default function App() {
           })
         })
 
-        setHexCount(hexEls.length)
-
-        // Centres pour dessiner pions/pings
-        const centers: Array<{cx:number, cy:number}> = []
-        hexEls.forEach((el) => {
-          const box = el.getBBox()
-          centers.push({ cx: box.x + box.width/2, cy: box.y + box.height/2 })
+        // 6) Centres pour dessiner pions/pings au bon endroit (après TRI)
+        const centers = hexList.map(({ el, box }) => {
           if (debugOverlay) (el as SVGElement).setAttribute('fill', 'rgba(0,150,255,0.12)')
+          return { cx: box.x + box.width / 2, cy: box.y + box.height / 2 }
         })
+
+        setHexCount(hexList.length)
         setHexCenters(centers)
       } catch (e) {
         console.error('load svg error', e)
       }
     })()
     return () => { cancelled = true }
-  }, [joined, mode, debugOverlay])
+  }, [joined, mode, debugOverlay, state.roomId])
 
   // Échelle uniforme + offsets (responsive)
   const { scaleU, effOffX, effOffY } = useMemo(() => {
@@ -243,7 +290,7 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16 }}>
-      <h1 style={{ marginTop: 0 }}>Heroes — Overlay paths/polygons OK</h1>
+      <h1 style={{ marginTop: 0 }}>Heroes — Overlay filtré & index stable</h1>
       <p>Socket: {connected ? '✅ connecté' : '❌ déconnecté'} · ID: {mySocketId || '...'}</p>
 
       {!joined ? (
@@ -262,7 +309,7 @@ export default function App() {
           <div ref={containerRef} style={{ position:'relative', width:'100%', maxWidth: 1200 }}>
             <img src="/assets/board.png" alt="Plateau" style={{ display:'block', width:'100%', height:'auto' }} />
 
-            {/* Overlay inline */}
+            {/* Overlay inline (SVG) */}
             <div
               ref={overlayWrapRef}
               style={{
@@ -274,7 +321,7 @@ export default function App() {
               }}
             />
 
-            {/* Pions + Pings */}
+            {/* Pions + Pings (dans le même repère que l’overlay) */}
             <svg
               style={{
                 position:'absolute', inset:0,
@@ -360,7 +407,7 @@ export default function App() {
             <div style={{ marginTop: 16 }}>
               <h3>Infos overlay</h3>
               <p style={{ fontSize:12, color:'#666' }}>
-                Formes cliquables (paths/polygons) : <b>{hexCount}</b>
+                Hex cliquables (filtrés & ordonnés) : <b>{hexCount}</b>
               </p>
             </div>
           </div>
