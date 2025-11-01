@@ -52,6 +52,10 @@ export default function App() {
   const [mode, setMode] = useState<ActionMode>('ping')
   const [alignSrc, setAlignSrc] = useState<AlignJSON | null>(null)
 
+  // DEBUG UI
+  const [debugOverlay, setDebugOverlay] = useState(false)
+  const [lastClick, setLastClick] = useState<number | null>(null)
+
   // Mesure responsive
   useEffect(() => {
     if (!containerRef.current) return
@@ -102,7 +106,7 @@ export default function App() {
     })()
   }, [])
 
-  // Charger SVG inline 1:1
+  // Charger SVG inline 1:1 **avec clics fiables**
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -116,6 +120,7 @@ export default function App() {
         const doc = parser.parseFromString(text, 'image/svg+xml')
         const inlineSvg = doc.documentElement as unknown as SVGSVGElement
 
+        // Taille native depuis viewBox
         if (inlineSvg.viewBox && inlineSvg.viewBox.baseVal) {
           const vb = inlineSvg.viewBox.baseVal
           setNativeSize({ w: vb.width, h: vb.height })
@@ -124,33 +129,59 @@ export default function App() {
           const h = Number(inlineSvg.getAttribute('height')) || 0
           setNativeSize({ w, h })
         }
+
+        // Important: pas de distorsion
         inlineSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet')
         inlineSvg.style.width = '100%'
         inlineSvg.style.height = '100%'
 
+        // Injecte dans le wrapper
         const wrap = overlayWrapRef.current
         if (!wrap) return
         wrap.innerHTML = ''
         wrap.appendChild(inlineSvg)
         svgRef.current = inlineSvg
 
+        // Rendez chaque polygon cliquable même s'il a fill="none"
         const polys = inlineSvg.querySelectorAll('polygon')
         polys.forEach((poly, index) => {
           poly.setAttribute('data-index', String(index))
-          ;(poly as SVGElement).style.cursor = 'pointer'
+          // forcer un remplissage transparent pour capter le clic partout
+          if (!poly.getAttribute('fill') || poly.getAttribute('fill') === 'none') {
+            poly.setAttribute('fill', 'rgba(0,0,0,0)')
+          }
+          // forcer la capture des événements
+          ;(poly as SVGElement).style.pointerEvents = 'all'
+          // un peu de stroke pour repérer au survol en debug
+          if (!poly.getAttribute('stroke')) {
+            poly.setAttribute('stroke', 'rgba(0,0,0,0.35)')
+          }
+          poly.addEventListener('mouseenter', () => {
+            if (debugOverlay) poly.setAttribute('stroke', 'rgba(0,0,0,0.8)')
+          })
+          poly.addEventListener('mouseleave', () => {
+            if (debugOverlay) poly.setAttribute('stroke', 'rgba(0,0,0,0.35)')
+          })
           poly.addEventListener('click', () => {
             const rId = state.roomId || ''
             if (!rId) return
+            console.log('[Heroes] click hex #', index)
+            setLastClick(index)
             if (mode === 'ping') socket.emit('selectCell', { roomId: rId, index })
             else socket.emit('setPawn', { roomId: rId, index })
           })
         })
         setHexCount(polys.length)
 
+        // Centres natifs (dans le repère du SVG)
         const centers: Array<{cx:number, cy:number}> = []
         polys.forEach((poly) => {
           const box = (poly as SVGGraphicsElement).getBBox()
           centers.push({ cx: box.x + box.width/2, cy: box.y + box.height/2 })
+          // si debug, colorie légèrement
+          if (debugOverlay) {
+            (poly as SVGElement).setAttribute('fill', 'rgba(0,150,255,0.12)')
+          }
         })
         setHexCenters(centers)
       } catch (e) {
@@ -158,7 +189,7 @@ export default function App() {
       }
     })()
     return () => { cancelled = true }
-  }, [joined, mode])
+  }, [joined, mode, debugOverlay])
 
   // Échelle uniforme + offsets
   const { scaleU, effOffX, effOffY } = useMemo(() => {
@@ -194,7 +225,7 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16 }}>
-      <h1 style={{ marginTop: 0 }}>Heroes — PA/PH + Méditer + Déplacement (1 PA)</h1>
+      <h1 style={{ marginTop: 0 }}>Heroes — Test clics overlay (pion & ping)</h1>
       <p>Socket: {connected ? '✅ connecté' : '❌ déconnecté'} · ID: {mySocketId || '...'}</p>
 
       {!joined ? (
@@ -208,7 +239,7 @@ export default function App() {
           <button type="submit" style={{ padding:'6px 12px' }}>Rejoindre / Créer la partie</button>
         </form>
       ) : (
-        <section style={{ display:'grid', gridTemplateColumns:'1fr 340px', gap:16, alignItems:'start' }}>
+        <section style={{ display:'grid', gridTemplateColumns:'1fr 360px', gap:16, alignItems:'start' }}>
           {/* Plateau */}
           <div ref={containerRef} style={{ position:'relative', width:'100%', maxWidth: 1200 }}>
             <img src="/assets/board.png" alt="Plateau" style={{ display:'block', width:'100%', height:'auto' }} />
@@ -220,7 +251,8 @@ export default function App() {
                 position:'absolute', inset:0,
                 transform: overlayTransform,
                 transformOrigin:'top left',
-                pointerEvents:'auto'
+                pointerEvents:'auto',
+                zIndex: 10
               }}
             />
 
@@ -231,7 +263,8 @@ export default function App() {
                 transform: overlayTransform,
                 transformOrigin:'top left',
                 width:'100%', height:'100%',
-                pointerEvents:'none'
+                pointerEvents:'none',
+                zIndex: 20
               }}
             >
               {/* Pions */}
@@ -276,31 +309,26 @@ export default function App() {
             </ul>
 
             <div style={{ marginTop: 16, padding:12, border:'1px solid #ddd', borderRadius:8 }}>
-              <h3 style={{ margin:'0 0 8px' }}>Ton tour</h3>
-              <p style={{ margin:'0 0 6px', fontSize:14 }}>
-                {isMyTurn ? '🟢 À toi de jouer' : '⚪ Attends ton tour'}
-              </p>
-              <p style={{ margin:'0 0 10px', fontSize:14 }}>
-                PA: <b>{me?.pa ?? 0}/{me?.paMax ?? 0}</b> · PH: <b>{me?.ph ?? 0}/{me?.phMax ?? 0}</b>
-              </p>
-              <div style={{ display:'grid', gap:8 }}>
-                <button onClick={meditate} disabled={!canMeditate} style={{ padding:'8px 12px' }}>
-                  Méditer (−1 PA → +2 PH)
-                </button>
-                <div style={{ display:'flex', gap:12, alignItems:'center' }}>
-                  <label style={{ display:'flex', gap:6, alignItems:'center' }}>
-                    <input type="radio" name="mode" checked={mode==='ping'} onChange={()=>setMode('ping')} />
-                    Ping (montrer une case)
-                  </label>
-                  <label style={{ display:'flex', gap:6, alignItems:'center' }}>
-                    <input type="radio" name="mode" checked={mode==='move'} onChange={()=>setMode('move')} />
-                    Déplacer mon pion (coût 1 PA)
-                  </label>
-                </div>
-                <button onClick={endTurn} disabled={!isMyTurn} style={{ padding:'8px 12px' }}>
-                  Fin de tour
-                </button>
+              <h3 style={{ margin:'0 0 8px' }}>Actions</h3>
+              <div style={{ display:'flex', gap:12, alignItems:'center', marginBottom:8 }}>
+                <label style={{ display:'flex', gap:6, alignItems:'center' }}>
+                  <input type="radio" name="mode" checked={mode==='ping'} onChange={()=>setMode('ping')} />
+                  Ping (montrer une case)
+                </label>
+                <label style={{ display:'flex', gap:6, alignItems:'center' }}>
+                  <input type="radio" name="mode" checked={mode==='move'} onChange={()=>setMode('move')} />
+                  Déplacer mon pion
+                </label>
               </div>
+              <div style={{ display:'flex', gap:12, alignItems:'center', marginTop:8 }}>
+                <label style={{ display:'flex', gap:6, alignItems:'center' }}>
+                  <input type="checkbox" checked={debugOverlay} onChange={e=>setDebugOverlay(e.target.checked)} />
+                  Debug overlay (colorer les hex + hover)
+                </label>
+              </div>
+              <p style={{ fontSize:12, color:'#666', marginTop:8 }}>
+                Dernier clic: {lastClick === null ? '—' : `hex #${lastClick}`}
+              </p>
             </div>
 
             <div style={{ marginTop: 16 }}>
