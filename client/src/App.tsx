@@ -6,9 +6,9 @@ type Selection = { playerId: string; index: number }
 type Pawn = { playerId: string; index: number }
 type RoomState = {
   roomId: string
-  players: Player[]
-  currentPlayerId: string | null
-  board: { selections: Selection[]; pawns: Pawn[] }
+  players?: Player[]
+  currentPlayerId?: string | null
+  board?: { selections?: Selection[]; pawns?: Pawn[] }
 }
 
 type AlignJSON = {
@@ -16,8 +16,8 @@ type AlignJSON = {
   scaleY: number
   offX: number
   offY: number
-  baseW?: number // largeur de référence (px)
-  baseH?: number // hauteur de référence (px)
+  baseW?: number
+  baseH?: number
 }
 
 const socket: Socket = io()
@@ -30,6 +30,10 @@ function colorFor(id: string) {
 }
 type ActionMode = 'ping' | 'move'
 
+function safePlayers(s?: Player[]) { return Array.isArray(s) ? s : [] }
+function safeSelections(b?: RoomState['board']) { return Array.isArray(b?.selections) ? b!.selections! : [] }
+function safePawns(b?: RoomState['board']) { return Array.isArray(b?.pawns) ? b!.pawns! : [] }
+
 export default function App() {
   // Lobby
   const [connected, setConnected] = useState(false)
@@ -38,7 +42,7 @@ export default function App() {
   const [roomId, setRoomId] = useState('TEST01')
   const [joined, setJoined] = useState(false)
 
-  // État serveur
+  // État serveur (défauts ultra-sûrs)
   const [state, setState] = useState<RoomState>({
     roomId: '',
     players: [],
@@ -47,40 +51,32 @@ export default function App() {
   })
 
   // Overlay inline
-  const containerRef = useRef<HTMLDivElement>(null)     // conteneur plateau
-  const overlayWrapRef = useRef<HTMLDivElement>(null)   // wrapper transformé
+  const containerRef = useRef<HTMLDivElement>(null)
+  const overlayWrapRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const [hexCenters, setHexCenters] = useState<Array<{cx:number, cy:number}>>([])
   const [hexCount, setHexCount] = useState(0)
 
-  // Action (ping ou déplacer pion)
+  // Action
   const [mode, setMode] = useState<ActionMode>('ping')
 
   // --------- ALIGNEMENT (responsive) ----------
-  // Valeurs sources lues depuis overlay-align.json (et PAS le localStorage)
   const [alignSrc, setAlignSrc] = useState<AlignJSON | null>(null)
-  // Mesures runtime (taille actuelle du plateau affiché)
   const [containerSize, setContainerSize] = useState<{w:number, h:number}>({w:0, h:0})
 
-  // Calcul des valeurs effectives en fonction de la taille d’écran
   const { effScaleX, effScaleY, effOffX, effOffY } = useMemo(() => {
     if (!alignSrc || !containerSize.w || !containerSize.h) {
       return { effScaleX: 1, effScaleY: 1, effOffX: 0, effOffY: 0 }
     }
-    // Nettoyage des valeurs (corrige le bug "680" -> "0.680")
     const clean = (v: number) => (v > 5 ? v / 1000 : v)
-
     const baseW = alignSrc.baseW && alignSrc.baseW > 0 ? alignSrc.baseW : containerSize.w
     const baseH = alignSrc.baseH && alignSrc.baseH > 0 ? alignSrc.baseH : containerSize.h
-
     const kx = containerSize.w / baseW
     const ky = containerSize.h / baseH
-
     const scaleX = clean(alignSrc.scaleX)
     const scaleY = clean(alignSrc.scaleY)
-    const offX = alignSrc.offX
-    const offY = alignSrc.offY
-
+    const offX = alignSrc.offX ?? 0
+    const offY = alignSrc.offY ?? 0
     return {
       effScaleX: scaleX * kx,
       effScaleY: scaleY * ky,
@@ -89,7 +85,6 @@ export default function App() {
     }
   }, [alignSrc, containerSize])
 
-  // Layout resize observer pour maj containerSize
   useEffect(() => {
     if (!containerRef.current) return
     const el = containerRef.current
@@ -108,8 +103,22 @@ export default function App() {
     const onConnect = () => { setConnected(true); setMySocketId(socket.id) }
     const onDisconnect = () => setConnected(false)
     const onUpdate = (s: RoomState) => {
-      setState(s)
-      if (s.players.some(p => p.id === socket.id)) setJoined(true)
+      // durcissement: si le serveur envoie des champs incomplets, on comble avec des valeurs sûres
+      const hardened: RoomState = {
+        roomId: s.roomId ?? '',
+        players: safePlayers(s.players),
+        currentPlayerId: s.currentPlayerId ?? null,
+        board: {
+          selections: safeSelections(s.board),
+          pawns: safePawns(s.board),
+        }
+      }
+      // log si anomalie détectée
+      if (!Array.isArray(s.players) || !s.board || !Array.isArray(s.board.selections) || !Array.isArray(s.board.pawns)) {
+        console.warn('[Heroes] État serveur incomplet, application des valeurs par défaut:', s)
+      }
+      setState(hardened)
+      if (hardened.players!.some(p => p.id === socket.id)) setJoined(true)
     }
     socket.on('connect', onConnect)
     socket.on('disconnect', onDisconnect)
@@ -121,7 +130,7 @@ export default function App() {
     }
   }, [])
 
-  // Charger ALIGN JSON (priorité absolue; ignore le localStorage)
+  // Charger ALIGN JSON
   useEffect(() => {
     (async () => {
       try {
@@ -129,28 +138,24 @@ export default function App() {
         if (!res.ok) return
         const json = await res.json() as AlignJSON
         setAlignSrc(json)
-      } catch {}
+      } catch (e) {
+        console.warn('[Heroes] overlay-align.json introuvable ou invalide (fallback neutre).', e)
+      }
     })()
   }, [])
 
-  // Export alignement NORMALISÉ (inclut baseW/baseH pour un rendu identique partout)
+  // Export alignement normalisé (si besoin)
   function exportAlignNormalized() {
-    // si pas encore de base, on capture la taille actuelle du conteneur comme référence
     const baseW = alignSrc?.baseW && alignSrc.baseW > 0 ? alignSrc.baseW : containerSize.w
     const baseH = alignSrc?.baseH && alignSrc.baseH > 0 ? alignSrc.baseH : containerSize.h
-    // pour réexporter, on inverse la projection afin d’enregistrer les "valeurs sources"
-    const kx = baseW ? containerSize.w / baseW : 1
-    const ky = baseH ? containerSize.h / baseH : 1
     const src = alignSrc || { scaleX: 1, scaleY: 1, offX: 0, offY: 0 }
     const clean = (v:number)=> (v>5? v/1000 : v)
-
     const data: AlignJSON = {
       scaleX: clean(src.scaleX),
       scaleY: clean(src.scaleY),
       offX: src.offX,
       offY: src.offY,
-      baseW,
-      baseH
+      baseW, baseH
     }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -192,9 +197,10 @@ export default function App() {
           poly.addEventListener('mouseenter', () => poly.setAttribute('stroke-width', '2'))
           poly.addEventListener('mouseleave', () => poly.setAttribute('stroke-width', '1'))
           poly.addEventListener('click', () => {
-            if (!state.roomId) return
-            if (mode === 'ping') socket.emit('selectCell', { roomId: state.roomId, index })
-            else socket.emit('setPawn', { roomId: state.roomId, index })
+            const currentRoom = state.roomId || ''
+            if (!currentRoom) return
+            if (mode === 'ping') socket.emit('selectCell', { roomId: currentRoom, index })
+            else socket.emit('setPawn', { roomId: currentRoom, index })
           })
         })
         setHexCount(polys.length)
@@ -213,21 +219,20 @@ export default function App() {
   }, [joined, mode])
 
   const isMyTurn = useMemo(
-    () => state.currentPlayerId !== null && state.currentPlayerId === mySocketId,
+    () => (state.currentPlayerId ?? null) !== null && state.currentPlayerId === mySocketId,
     [state.currentPlayerId, mySocketId]
   )
-  const endTurn = () => state.roomId && socket.emit('endTurn', { roomId: state.roomId })
+  const endTurn = () => (state.roomId || '') && socket.emit('endTurn', { roomId: state.roomId })
 
-  // Transform appliqué au wrapper overlay (responsive)
   const overlayTransform = `translate(${effOffX}px, ${effOffY}px) scale(${effScaleX}, ${effScaleY})`
 
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16 }}>
-      <h1 style={{ marginTop: 0 }}>Heroes — Overlay SVG aligné & responsive</h1>
+      <h1 style={{ marginTop: 0 }}>Heroes — Overlay SVG aligné & robuste</h1>
       <p>Socket: {connected ? '✅ connecté' : '❌ déconnecté'} · ID: {mySocketId || '...'}</p>
 
       {!joined ? (
-        <form onSubmit={(e)=>{e.preventDefault(); if(name.trim() && roomId.trim()) socket.emit('joinRoom', { roomId: roomId.trim(), name: name.trim() })}} style={{ display: 'grid', gap: 8, maxWidth: 360 }}>
+        <form onSubmit={(e)=>{e.preventDefault(); const n=name.trim(); const r=roomId.trim(); if(n && r) socket.emit('joinRoom', { roomId: r, name: n })}} style={{ display: 'grid', gap: 8, maxWidth: 360 }}>
           <label>Pseudo<br />
             <input value={name} onChange={e=>setName(e.target.value)} maxLength={24} placeholder="Ex: Alice" />
           </label>
@@ -264,7 +269,7 @@ export default function App() {
               }}
             >
               {/* Pions */}
-              {state.board.pawns.map(p => {
+              {safePawns(state.board).map(p => {
                 const center = hexCenters[p.index]
                 if (!center) return null
                 const color = colorFor(p.playerId)
@@ -273,14 +278,14 @@ export default function App() {
                   <g key={`pawn-${p.playerId}`}>
                     <circle cx={center.cx} cy={center.cy} r={10} fill={color} stroke="#000" strokeWidth={1} />
                     <text x={center.cx} y={center.cy + 3} fontSize="10" textAnchor="middle" fill="#fff" style={{fontWeight:600}}>
-                      {initialsForPlayer(state.players, p.playerId)}
+                      {initialsForPlayer(safePlayers(state.players), p.playerId)}
                     </text>
                     {me && <circle cx={center.cx} cy={center.cy} r={14} fill="none" stroke={color} strokeWidth={2} opacity={0.6} />}
                   </g>
                 )
               })}
               {/* Pings */}
-              {state.board.selections.map(sel => {
+              {safeSelections(state.board).map(sel => {
                 const center = hexCenters[sel.index]
                 if (!center) return null
                 return <circle key={`ping-${sel.playerId}-${sel.index}`} cx={center.cx} cy={center.cy} r={6} fill={colorFor(sel.playerId)} opacity={0.8} />
@@ -290,9 +295,9 @@ export default function App() {
 
           {/* Panneau latéral */}
           <div>
-            <h3>Partie : {state.roomId}</h3>
+            <h3>Partie : {state.roomId || '...'}</h3>
             <ul style={{marginTop:0, paddingLeft:16}}>
-              {state.players.map(p => (
+              {safePlayers(state.players).map(p => (
                 <li key={p.id}>
                   {p.name} {p.id === mySocketId ? '(toi)' : ''} {state.currentPlayerId === p.id ? '← à lui/elle de jouer' : ''}
                 </li>
@@ -324,7 +329,7 @@ export default function App() {
                 Exporter l’alignement (normalisé)
               </button>
               <p style={{ fontSize:12, color:'#666', marginTop:8 }}>
-                Ce fichier inclut <code>baseW/baseH</code> pour un rendu identique sur tous les écrans.
+                Fichier inclut <code>baseW/baseH</code> pour un rendu identique sur tous les écrans.
               </p>
               <p style={{ fontSize:12, color:'#666' }}>
                 Hex détectés dans le SVG : <b>{hexCount}</b>
