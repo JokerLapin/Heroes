@@ -1,23 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 
-type Player = { id: string; name: string; seat: number }
+type Player = { id: string; name: string; seat: number; pa?: number; ph?: number; paMax?: number; phMax?: number }
 type Selection = { playerId: string; index: number }
 type Pawn = { playerId: string; index: number }
 type RoomState = {
-  roomId: string
+  roomId?: string
   players?: Player[]
   currentPlayerId?: string | null
   board?: { selections?: Selection[]; pawns?: Pawn[] }
 }
 
-type AlignJSON = {
-  // on garde offX/offY pour le micro-ajustement
-  offX: number
-  offY: number
-  // facultatif: multiplicateur fin si tu veux (1.0 = pas de correction)
-  mult?: number
-}
+type AlignJSON = { offX?: number; offY?: number; mult?: number }
 
 const socket: Socket = io()
 
@@ -31,18 +25,15 @@ function colorFor(id: string) {
   const hue = Math.abs(h) % 360
   return `hsl(${hue}, 65%, 50%)`
 }
-
 type ActionMode = 'ping' | 'move'
 
 export default function App() {
-  // Lobby
   const [connected, setConnected] = useState(false)
   const [mySocketId, setMySocketId] = useState('')
   const [name, setName] = useState('')
   const [roomId, setRoomId] = useState('TEST01')
   const [joined, setJoined] = useState(false)
 
-  // État serveur (sûr par défaut)
   const [state, setState] = useState<RoomState>({
     roomId: '',
     players: [],
@@ -50,27 +41,18 @@ export default function App() {
     board: { selections: [], pawns: [] },
   })
 
-  // Refs & mesures
-  const containerRef = useRef<HTMLDivElement>(null) // conteneur du plateau
-  const overlayWrapRef = useRef<HTMLDivElement>(null) // où on insère le SVG inline
+  const containerRef = useRef<HTMLDivElement>(null)
+  const overlayWrapRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const [hexCenters, setHexCenters] = useState<Array<{cx:number, cy:number}>>([])
   const [hexCount, setHexCount] = useState(0)
-
-  // Taille réelle à l’écran du conteneur
   const [containerSize, setContainerSize] = useState<{w:number, h:number}>({w:0, h:0})
-  // Taille native du SVG (d’après viewBox)
   const [nativeSize, setNativeSize] = useState<{w:number, h:number}>({w:0, h:0})
 
-  // Action au clic
   const [mode, setMode] = useState<ActionMode>('ping')
-
-  // Align JSON (micro-ajustements globaux)
   const [alignSrc, setAlignSrc] = useState<AlignJSON | null>(null)
 
-  // --- Observers / chargements ---
-
-  // Observe la taille à l’écran
+  // Mesure responsive
   useEffect(() => {
     if (!containerRef.current) return
     const el = containerRef.current
@@ -84,7 +66,7 @@ export default function App() {
     return () => ro.disconnect()
   }, [])
 
-  // Connexion socket
+  // Socket
   useEffect(() => {
     const onConnect = () => { setConnected(true); setMySocketId(socket.id) }
     const onDisconnect = () => setConnected(false)
@@ -93,10 +75,7 @@ export default function App() {
         roomId: s.roomId ?? '',
         players: safePlayers(s.players),
         currentPlayerId: s.currentPlayerId ?? null,
-        board: {
-          selections: safeSelections(s.board),
-          pawns: safePawns(s.board),
-        }
+        board: { selections: safeSelections(s.board), pawns: safePawns(s.board) }
       }
       setState(hardened)
       if (hardened.players!.some(p => p.id === socket.id)) setJoined(true)
@@ -111,25 +90,19 @@ export default function App() {
     }
   }, [])
 
-  // Charger les micro-ajustements
+  // Align JSON
   useEffect(() => {
     (async () => {
       try {
         const res = await fetch('/overlay-align.json', { cache: 'no-store' })
         if (!res.ok) return
         const json = await res.json() as AlignJSON
-        setAlignSrc({
-          offX: Number(json.offX) || 0,
-          offY: Number(json.offY) || 0,
-          mult: typeof json.mult === 'number' ? json.mult : 1
-        })
-      } catch {
-        // pas grave si absent
-      }
+        setAlignSrc({ offX: Number(json.offX) || 0, offY: Number(json.offY) || 0, mult: typeof json.mult === 'number' ? json.mult : 1 })
+      } catch {}
     })()
   }, [])
 
-  // Charger le SVG inline (NON déformé)
+  // Charger SVG inline 1:1
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -143,18 +116,14 @@ export default function App() {
         const doc = parser.parseFromString(text, 'image/svg+xml')
         const inlineSvg = doc.documentElement as unknown as SVGSVGElement
 
-        // Lire viewBox pour connaître la taille native
         if (inlineSvg.viewBox && inlineSvg.viewBox.baseVal) {
           const vb = inlineSvg.viewBox.baseVal
           setNativeSize({ w: vb.width, h: vb.height })
         } else {
-          // fallback: widths/height en attributs
           const w = Number(inlineSvg.getAttribute('width')) || 0
           const h = Number(inlineSvg.getAttribute('height')) || 0
           setNativeSize({ w, h })
         }
-
-        // IMPORTANT : on ne met PAS preserveAspectRatio="none"
         inlineSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet')
         inlineSvg.style.width = '100%'
         inlineSvg.style.height = '100%'
@@ -165,7 +134,6 @@ export default function App() {
         wrap.appendChild(inlineSvg)
         svgRef.current = inlineSvg
 
-        // Rendre hex cliquables
         const polys = inlineSvg.querySelectorAll('polygon')
         polys.forEach((poly, index) => {
           poly.setAttribute('data-index', String(index))
@@ -179,7 +147,6 @@ export default function App() {
         })
         setHexCount(polys.length)
 
-        // Centres natifs (dans le repère du SVG)
         const centers: Array<{cx:number, cy:number}> = []
         polys.forEach((poly) => {
           const box = (poly as SVGGraphicsElement).getBBox()
@@ -193,42 +160,30 @@ export default function App() {
     return () => { cancelled = true }
   }, [joined, mode])
 
-  // --- Calcul de l’échelle uniforme & offsets responsives ---
-
-  const { scaleU, effOffX, effOffY, warnAR } = useMemo(() => {
-    const baseW = nativeSize.w
-    const baseH = nativeSize.h
+  // Échelle uniforme + offsets
+  const { scaleU, effOffX, effOffY } = useMemo(() => {
+    const baseW = nativeSize.w, baseH = nativeSize.h
     if (!baseW || !baseH || !containerSize.w || !containerSize.h) {
-      return { scaleU: 1, effOffX: 0, effOffY: 0, warnAR: false }
+      return { scaleU: 1, effOffX: 0, effOffY: 0 }
     }
-    // facteur d’échelle théorique en largeur & hauteur
-    const kx = containerSize.w / baseW
-    const ky = containerSize.h / baseH
-    // on force une mise à l’échelle UNIFORME (pas de déformation)
-    const k = Math.min(kx, ky)
-    // si l’aspect-ratio diffère vraiment, on le signale en console (info)
-    const warn = Math.abs(kx - ky) > 0.02
+    const k = Math.min(containerSize.w / baseW, containerSize.h / baseH)
     const mult = alignSrc?.mult ?? 1
     const offX = alignSrc?.offX ?? 0
     const offY = alignSrc?.offY ?? 0
-    return {
-      scaleU: k * mult,
-      effOffX: offX * k,
-      effOffY: offY * k,
-      warnAR: warn
-    }
+    return { scaleU: k * mult, effOffX: offX * k, effOffY: offY * k }
   }, [nativeSize, containerSize, alignSrc])
 
-  useEffect(() => {
-    if (warnAR) {
-      console.info('[Heroes] Le ratio du conteneur diffère du SVG — l’échelle est uniformisée (pas de déformation).')
-    }
-  }, [warnAR])
-
-  // Transform appliqué au wrapper overlay (uniforme)
   const overlayTransform = `translate(${effOffX}px, ${effOffY}px) scale(${scaleU})`
 
-  // Rendu initiales joueurs
+  // Helpers UI
+  const me = useMemo(() => safePlayers(state.players).find(p => p.id === mySocketId), [state.players, mySocketId])
+  const isMyTurn = useMemo(() => (state.currentPlayerId ?? null) !== null && state.currentPlayerId === mySocketId, [state.currentPlayerId, mySocketId])
+  const canMove = isMyTurn && (me?.pa ?? 0) > 0
+  const canMeditate = isMyTurn && (me?.pa ?? 0) > 0
+
+  const endTurn = () => (state.roomId || '') && socket.emit('endTurn', { roomId: state.roomId })
+  const meditate = () => (state.roomId || '') && socket.emit('meditate', { roomId: state.roomId })
+
   function initialsForPlayer(players: Player[], id: string) {
     const player = players.find(p => p.id === id)
     if (!player || !player.name) return '•'
@@ -237,16 +192,9 @@ export default function App() {
     return init || player.name[0].toUpperCase()
   }
 
-  // Rendu
-  const isMyTurn = useMemo(
-    () => (state.currentPlayerId ?? null) !== null && state.currentPlayerId === mySocketId,
-    [state.currentPlayerId, mySocketId]
-  )
-  const endTurn = () => (state.roomId || '') && socket.emit('endTurn', { roomId: state.roomId })
-
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16 }}>
-      <h1 style={{ marginTop: 0 }}>Heroes — Overlay SVG 1:1 (sans déformation)</h1>
+      <h1 style={{ marginTop: 0 }}>Heroes — PA/PH + Méditer + Déplacement (1 PA)</h1>
       <p>Socket: {connected ? '✅ connecté' : '❌ déconnecté'} · ID: {mySocketId || '...'}</p>
 
       {!joined ? (
@@ -260,16 +208,12 @@ export default function App() {
           <button type="submit" style={{ padding:'6px 12px' }}>Rejoindre / Créer la partie</button>
         </form>
       ) : (
-        <section style={{ display:'grid', gridTemplateColumns:'1fr 320px', gap:16, alignItems:'start' }}>
+        <section style={{ display:'grid', gridTemplateColumns:'1fr 340px', gap:16, alignItems:'start' }}>
           {/* Plateau */}
           <div ref={containerRef} style={{ position:'relative', width:'100%', maxWidth: 1200 }}>
-            <img
-              src="/assets/board.png"
-              alt="Plateau"
-              style={{ display:'block', width:'100%', height:'auto' }}
-            />
+            <img src="/assets/board.png" alt="Plateau" style={{ display:'block', width:'100%', height:'auto' }} />
 
-            {/* Overlay inline — mise à l’échelle UNIFORME + micro-offsets */}
+            {/* Overlay inline */}
             <div
               ref={overlayWrapRef}
               style={{
@@ -280,7 +224,7 @@ export default function App() {
               }}
             />
 
-            {/* Marqueurs (pions + pings) dans le même repère (uniforme) */}
+            {/* Pions + Pings */}
             <svg
               style={{
                 position:'absolute', inset:0,
@@ -295,14 +239,14 @@ export default function App() {
                 const center = hexCenters[p.index]
                 if (!center) return null
                 const color = colorFor(p.playerId)
-                const me = p.playerId === mySocketId
+                const meIt = p.playerId === mySocketId
                 return (
                   <g key={`pawn-${p.playerId}`}>
                     <circle cx={center.cx} cy={center.cy} r={10} fill={color} stroke="#000" strokeWidth={1} />
                     <text x={center.cx} y={center.cy + 3} fontSize="10" textAnchor="middle" fill="#fff" style={{fontWeight:600}}>
                       {initialsForPlayer(safePlayers(state.players), p.playerId)}
                     </text>
-                    {me && <circle cx={center.cx} cy={center.cy} r={14} fill="none" stroke={color} strokeWidth={2} opacity={0.6} />}
+                    {meIt && <circle cx={center.cx} cy={center.cy} r={14} fill="none" stroke={color} strokeWidth={2} opacity={0.6} />}
                   </g>
                 )
               })}
@@ -310,58 +254,59 @@ export default function App() {
               {safeSelections(state.board).map(sel => {
                 const center = hexCenters[sel.index]
                 if (!center) return null
-                return (
-                  <circle
-                    key={`ping-${sel.playerId}-${sel.index}`}
-                    cx={center.cx}
-                    cy={center.cy}
-                    r={6}
-                    fill={colorFor(sel.playerId)}
-                    opacity={0.8}
-                  />
-                )
+                return <circle key={`ping-${sel.playerId}-${sel.index}`} cx={center.cx} cy={center.cy} r={6} fill={colorFor(sel.playerId)} opacity={0.8} />
               })}
             </svg>
           </div>
 
           {/* Panneau latéral */}
           <div>
-            <h3>Partie : {state.roomId || '...'}</h3>
-            <ul style={{marginTop:0, paddingLeft:16}}>
+            <h3 style={{ margin:'0 0 8px' }}>Partie : {state.roomId}</h3>
+            <ul style={{ marginTop:0, paddingLeft:16 }}>
               {safePlayers(state.players).map(p => (
                 <li key={p.id}>
                   {p.name} {p.id === mySocketId ? '(toi)' : ''} {state.currentPlayerId === p.id ? '← à lui/elle de jouer' : ''}
+                  {typeof p.pa === 'number' && typeof p.paMax === 'number' && typeof p.ph === 'number' && typeof p.phMax === 'number' && (
+                    <div style={{ fontSize:12, color:'#555', marginLeft:8 }}>
+                      PA: <b>{p.pa}/{p.paMax}</b> · PH: <b>{p.ph}/{p.phMax}</b>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
 
-            <div style={{ marginTop: 16 }}>
-              <h3>Tour</h3>
-              <button onClick={endTurn} disabled={!isMyTurn} style={{ padding:'6px 12px' }}>
-                Fin de tour {isMyTurn ? '(à toi)' : ''}
-              </button>
-            </div>
-
-            <div style={{ marginTop: 16 }}>
-              <h3>Action au clic</h3>
-              <label style={{ display:'flex', gap:8, alignItems:'center' }}>
-                <input type="radio" name="mode" checked={mode==='ping'} onChange={()=>setMode('ping')} />
-                Ping (montrer une case)
-              </label>
-              <label style={{ display:'flex', gap:8, alignItems:'center', marginTop:4 }}>
-                <input type="radio" name="mode" checked={mode==='move'} onChange={()=>setMode('move')} />
-                Déplacer <b>mon pion</b>
-              </label>
-              <p style={{ fontSize:12, color:'#666' }}>
-                Si un très léger décalage subsiste, utilise <code>offX/offY</code> dans <code>overlay-align.json</code>.
-                Tu peux aussi ajouter <code>"mult": 1.0</code> pour affiner l’échelle globale si besoin.
+            <div style={{ marginTop: 16, padding:12, border:'1px solid #ddd', borderRadius:8 }}>
+              <h3 style={{ margin:'0 0 8px' }}>Ton tour</h3>
+              <p style={{ margin:'0 0 6px', fontSize:14 }}>
+                {isMyTurn ? '🟢 À toi de jouer' : '⚪ Attends ton tour'}
               </p>
+              <p style={{ margin:'0 0 10px', fontSize:14 }}>
+                PA: <b>{me?.pa ?? 0}/{me?.paMax ?? 0}</b> · PH: <b>{me?.ph ?? 0}/{me?.phMax ?? 0}</b>
+              </p>
+              <div style={{ display:'grid', gap:8 }}>
+                <button onClick={meditate} disabled={!canMeditate} style={{ padding:'8px 12px' }}>
+                  Méditer (−1 PA → +2 PH)
+                </button>
+                <div style={{ display:'flex', gap:12, alignItems:'center' }}>
+                  <label style={{ display:'flex', gap:6, alignItems:'center' }}>
+                    <input type="radio" name="mode" checked={mode==='ping'} onChange={()=>setMode('ping')} />
+                    Ping (montrer une case)
+                  </label>
+                  <label style={{ display:'flex', gap:6, alignItems:'center' }}>
+                    <input type="radio" name="mode" checked={mode==='move'} onChange={()=>setMode('move')} />
+                    Déplacer mon pion (coût 1 PA)
+                  </label>
+                </div>
+                <button onClick={endTurn} disabled={!isMyTurn} style={{ padding:'8px 12px' }}>
+                  Fin de tour
+                </button>
+              </div>
             </div>
 
             <div style={{ marginTop: 16 }}>
               <h3>Infos overlay</h3>
               <p style={{ fontSize:12, color:'#666' }}>
-                SVG détecté: <b>{nativeSize.w}×{nativeSize.h}</b> — Hex: <b>{hexCount}</b>
+                Hex dans le SVG : <b>{hexCount}</b>
               </p>
             </div>
           </div>
