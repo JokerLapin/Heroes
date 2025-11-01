@@ -3,4 +3,5 @@
   "scaleY": 0.796,
   "offX": 130,
   "offY": 95
+  // "baseW" et "baseH" seront ajoutés quand tu feras "Exporter l’alignement (normalisé)"
 }
