@@ -56,7 +56,7 @@ export default function App() {
   const [debugOverlay, setDebugOverlay] = useState(false)
   const [lastClick, setLastClick] = useState<number | null>(null)
 
-  // Mesure responsive
+  // Responsive measure
   useEffect(() => {
     if (!containerRef.current) return
     const el = containerRef.current
@@ -106,7 +106,7 @@ export default function App() {
     })()
   }, [])
 
-  // Charger SVG inline 1:1 **avec clics fiables**
+  // Charge le SVG inline et rend cliquables <polygon> ET <path>
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -120,7 +120,7 @@ export default function App() {
         const doc = parser.parseFromString(text, 'image/svg+xml')
         const inlineSvg = doc.documentElement as unknown as SVGSVGElement
 
-        // Taille native depuis viewBox
+        // Taille native via viewBox ou width/height
         if (inlineSvg.viewBox && inlineSvg.viewBox.baseVal) {
           const vb = inlineSvg.viewBox.baseVal
           setNativeSize({ w: vb.width, h: vb.height })
@@ -130,39 +130,59 @@ export default function App() {
           setNativeSize({ w, h })
         }
 
-        // Important: pas de distorsion
         inlineSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet')
         inlineSvg.style.width = '100%'
         inlineSvg.style.height = '100%'
 
-        // Injecte dans le wrapper
+        // Injecte
         const wrap = overlayWrapRef.current
         if (!wrap) return
         wrap.innerHTML = ''
         wrap.appendChild(inlineSvg)
         svgRef.current = inlineSvg
 
-        // Rendez chaque polygon cliquable même s'il a fill="none"
-        const polys = inlineSvg.querySelectorAll('polygon')
-        polys.forEach((poly, index) => {
-          poly.setAttribute('data-index', String(index))
-          // forcer un remplissage transparent pour capter le clic partout
-          if (!poly.getAttribute('fill') || poly.getAttribute('fill') === 'none') {
-            poly.setAttribute('fill', 'rgba(0,0,0,0)')
+        // Récupère TOUTES les formes candidates (paths + polygons)
+        // On va filtrer : visible, bbox non vide, pas dans <defs>/<mask>
+        const allShapes = Array.from(inlineSvg.querySelectorAll<SVGGraphicsElement>('polygon, path'))
+
+        // Aide : savoir si un node est sous <defs> ou <mask>
+        const isInHiddenContainer = (el: Element) => {
+          let p: Element | null = el
+          while (p) {
+            const tag = p.tagName.toLowerCase()
+            if (tag === 'defs' || tag === 'mask' || tag === 'clipPath') return true
+            p = p.parentElement
           }
-          // forcer la capture des événements
-          ;(poly as SVGElement).style.pointerEvents = 'all'
-          // un peu de stroke pour repérer au survol en debug
-          if (!poly.getAttribute('stroke')) {
-            poly.setAttribute('stroke', 'rgba(0,0,0,0.35)')
-          }
-          poly.addEventListener('mouseenter', () => {
-            if (debugOverlay) poly.setAttribute('stroke', 'rgba(0,0,0,0.8)')
+          return false
+        }
+
+        const hexEls: SVGGraphicsElement[] = []
+        allShapes.forEach(el => {
+          if (isInHiddenContainer(el)) return
+          let box: DOMRect
+          try { box = el.getBBox() } catch { return }
+          if (!box || box.width === 0 || box.height === 0) return
+          hexEls.push(el)
+        })
+
+        // Attache listeners / styles
+        hexEls.forEach((shape, index) => {
+          shape.setAttribute('data-index', String(index))
+
+          // Force capture clic même si fill="none"
+          const fill = shape.getAttribute('fill')
+          if (!fill || fill === 'none') shape.setAttribute('fill', 'rgba(0,0,0,0)')
+          ;(shape as SVGElement).style.pointerEvents = 'all'
+
+          // Un peu de stroke par défaut (utile en debug)
+          if (!shape.getAttribute('stroke')) shape.setAttribute('stroke', 'rgba(0,0,0,0.35)')
+          shape.addEventListener('mouseenter', () => {
+            if (debugOverlay) shape.setAttribute('stroke', 'rgba(0,0,0,0.8)')
           })
-          poly.addEventListener('mouseleave', () => {
-            if (debugOverlay) poly.setAttribute('stroke', 'rgba(0,0,0,0.35)')
+          shape.addEventListener('mouseleave', () => {
+            if (debugOverlay) shape.setAttribute('stroke', 'rgba(0,0,0,0.35)')
           })
-          poly.addEventListener('click', () => {
+          shape.addEventListener('click', () => {
             const rId = state.roomId || ''
             if (!rId) return
             console.log('[Heroes] click hex #', index)
@@ -171,17 +191,15 @@ export default function App() {
             else socket.emit('setPawn', { roomId: rId, index })
           })
         })
-        setHexCount(polys.length)
 
-        // Centres natifs (dans le repère du SVG)
+        setHexCount(hexEls.length)
+
+        // Centres pour dessiner pions/pings
         const centers: Array<{cx:number, cy:number}> = []
-        polys.forEach((poly) => {
-          const box = (poly as SVGGraphicsElement).getBBox()
+        hexEls.forEach((el) => {
+          const box = el.getBBox()
           centers.push({ cx: box.x + box.width/2, cy: box.y + box.height/2 })
-          // si debug, colorie légèrement
-          if (debugOverlay) {
-            (poly as SVGElement).setAttribute('fill', 'rgba(0,150,255,0.12)')
-          }
+          if (debugOverlay) (el as SVGElement).setAttribute('fill', 'rgba(0,150,255,0.12)')
         })
         setHexCenters(centers)
       } catch (e) {
@@ -191,7 +209,7 @@ export default function App() {
     return () => { cancelled = true }
   }, [joined, mode, debugOverlay])
 
-  // Échelle uniforme + offsets
+  // Échelle uniforme + offsets (responsive)
   const { scaleU, effOffX, effOffY } = useMemo(() => {
     const baseW = nativeSize.w, baseH = nativeSize.h
     if (!baseW || !baseH || !containerSize.w || !containerSize.h) {
@@ -225,7 +243,7 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16 }}>
-      <h1 style={{ marginTop: 0 }}>Heroes — Test clics overlay (pion & ping)</h1>
+      <h1 style={{ marginTop: 0 }}>Heroes — Overlay paths/polygons OK</h1>
       <p>Socket: {connected ? '✅ connecté' : '❌ déconnecté'} · ID: {mySocketId || '...'}</p>
 
       {!joined ? (
@@ -317,24 +335,32 @@ export default function App() {
                 </label>
                 <label style={{ display:'flex', gap:6, alignItems:'center' }}>
                   <input type="radio" name="mode" checked={mode==='move'} onChange={()=>setMode('move')} />
-                  Déplacer mon pion
+                  Déplacer mon pion (coût 1 PA)
                 </label>
               </div>
               <div style={{ display:'flex', gap:12, alignItems:'center', marginTop:8 }}>
                 <label style={{ display:'flex', gap:6, alignItems:'center' }}>
                   <input type="checkbox" checked={debugOverlay} onChange={e=>setDebugOverlay(e.target.checked)} />
-                  Debug overlay (colorer les hex + hover)
+                  Debug overlay (colorer les cases + hover)
                 </label>
               </div>
               <p style={{ fontSize:12, color:'#666', marginTop:8 }}>
                 Dernier clic: {lastClick === null ? '—' : `hex #${lastClick}`}
               </p>
+              <div style={{ display:'grid', gap:8, marginTop:8 }}>
+                <button onClick={meditate} disabled={!canMeditate} style={{ padding:'8px 12px' }}>
+                  Méditer (−1 PA → +2 PH)
+                </button>
+                <button onClick={endTurn} disabled={!isMyTurn} style={{ padding:'8px 12px' }}>
+                  Fin de tour
+                </button>
+              </div>
             </div>
 
             <div style={{ marginTop: 16 }}>
               <h3>Infos overlay</h3>
               <p style={{ fontSize:12, color:'#666' }}>
-                Hex dans le SVG : <b>{hexCount}</b>
+                Formes cliquables (paths/polygons) : <b>{hexCount}</b>
               </p>
             </div>
           </div>
