@@ -12,15 +12,18 @@ type RoomState = {
 }
 
 type AlignJSON = {
-  scaleX: number
-  scaleY: number
+  // on garde offX/offY pour le micro-ajustement
   offX: number
   offY: number
-  baseW?: number
-  baseH?: number
+  // facultatif: multiplicateur fin si tu veux (1.0 = pas de correction)
+  mult?: number
 }
 
 const socket: Socket = io()
+
+const safePlayers = (s?: Player[]) => Array.isArray(s) ? s : []
+const safeSelections = (b?: RoomState['board']) => Array.isArray(b?.selections) ? b!.selections! : []
+const safePawns = (b?: RoomState['board']) => Array.isArray(b?.pawns) ? b!.pawns! : []
 
 function colorFor(id: string) {
   let h = 0
@@ -28,11 +31,8 @@ function colorFor(id: string) {
   const hue = Math.abs(h) % 360
   return `hsl(${hue}, 65%, 50%)`
 }
-type ActionMode = 'ping' | 'move'
 
-function safePlayers(s?: Player[]) { return Array.isArray(s) ? s : [] }
-function safeSelections(b?: RoomState['board']) { return Array.isArray(b?.selections) ? b!.selections! : [] }
-function safePawns(b?: RoomState['board']) { return Array.isArray(b?.pawns) ? b!.pawns! : [] }
+type ActionMode = 'ping' | 'move'
 
 export default function App() {
   // Lobby
@@ -42,7 +42,7 @@ export default function App() {
   const [roomId, setRoomId] = useState('TEST01')
   const [joined, setJoined] = useState(false)
 
-  // État serveur (défauts ultra-sûrs)
+  // État serveur (sûr par défaut)
   const [state, setState] = useState<RoomState>({
     roomId: '',
     players: [],
@@ -50,41 +50,27 @@ export default function App() {
     board: { selections: [], pawns: [] },
   })
 
-  // Overlay inline
-  const containerRef = useRef<HTMLDivElement>(null)
-  const overlayWrapRef = useRef<HTMLDivElement>(null)
+  // Refs & mesures
+  const containerRef = useRef<HTMLDivElement>(null) // conteneur du plateau
+  const overlayWrapRef = useRef<HTMLDivElement>(null) // où on insère le SVG inline
   const svgRef = useRef<SVGSVGElement | null>(null)
   const [hexCenters, setHexCenters] = useState<Array<{cx:number, cy:number}>>([])
   const [hexCount, setHexCount] = useState(0)
 
-  // Action
+  // Taille réelle à l’écran du conteneur
+  const [containerSize, setContainerSize] = useState<{w:number, h:number}>({w:0, h:0})
+  // Taille native du SVG (d’après viewBox)
+  const [nativeSize, setNativeSize] = useState<{w:number, h:number}>({w:0, h:0})
+
+  // Action au clic
   const [mode, setMode] = useState<ActionMode>('ping')
 
-  // --------- ALIGNEMENT (responsive) ----------
+  // Align JSON (micro-ajustements globaux)
   const [alignSrc, setAlignSrc] = useState<AlignJSON | null>(null)
-  const [containerSize, setContainerSize] = useState<{w:number, h:number}>({w:0, h:0})
 
-  const { effScaleX, effScaleY, effOffX, effOffY } = useMemo(() => {
-    if (!alignSrc || !containerSize.w || !containerSize.h) {
-      return { effScaleX: 1, effScaleY: 1, effOffX: 0, effOffY: 0 }
-    }
-    const clean = (v: number) => (v > 5 ? v / 1000 : v)
-    const baseW = alignSrc.baseW && alignSrc.baseW > 0 ? alignSrc.baseW : containerSize.w
-    const baseH = alignSrc.baseH && alignSrc.baseH > 0 ? alignSrc.baseH : containerSize.h
-    const kx = containerSize.w / baseW
-    const ky = containerSize.h / baseH
-    const scaleX = clean(alignSrc.scaleX)
-    const scaleY = clean(alignSrc.scaleY)
-    const offX = alignSrc.offX ?? 0
-    const offY = alignSrc.offY ?? 0
-    return {
-      effScaleX: scaleX * kx,
-      effScaleY: scaleY * ky,
-      effOffX: offX * kx,
-      effOffY: offY * ky,
-    }
-  }, [alignSrc, containerSize])
+  // --- Observers / chargements ---
 
+  // Observe la taille à l’écran
   useEffect(() => {
     if (!containerRef.current) return
     const el = containerRef.current
@@ -103,7 +89,6 @@ export default function App() {
     const onConnect = () => { setConnected(true); setMySocketId(socket.id) }
     const onDisconnect = () => setConnected(false)
     const onUpdate = (s: RoomState) => {
-      // durcissement: si le serveur envoie des champs incomplets, on comble avec des valeurs sûres
       const hardened: RoomState = {
         roomId: s.roomId ?? '',
         players: safePlayers(s.players),
@@ -112,10 +97,6 @@ export default function App() {
           selections: safeSelections(s.board),
           pawns: safePawns(s.board),
         }
-      }
-      // log si anomalie détectée
-      if (!Array.isArray(s.players) || !s.board || !Array.isArray(s.board.selections) || !Array.isArray(s.board.pawns)) {
-        console.warn('[Heroes] État serveur incomplet, application des valeurs par défaut:', s)
       }
       setState(hardened)
       if (hardened.players!.some(p => p.id === socket.id)) setJoined(true)
@@ -130,43 +111,25 @@ export default function App() {
     }
   }, [])
 
-  // Charger ALIGN JSON
+  // Charger les micro-ajustements
   useEffect(() => {
     (async () => {
       try {
         const res = await fetch('/overlay-align.json', { cache: 'no-store' })
         if (!res.ok) return
         const json = await res.json() as AlignJSON
-        setAlignSrc(json)
-      } catch (e) {
-        console.warn('[Heroes] overlay-align.json introuvable ou invalide (fallback neutre).', e)
+        setAlignSrc({
+          offX: Number(json.offX) || 0,
+          offY: Number(json.offY) || 0,
+          mult: typeof json.mult === 'number' ? json.mult : 1
+        })
+      } catch {
+        // pas grave si absent
       }
     })()
   }, [])
 
-  // Export alignement normalisé (si besoin)
-  function exportAlignNormalized() {
-    const baseW = alignSrc?.baseW && alignSrc.baseW > 0 ? alignSrc.baseW : containerSize.w
-    const baseH = alignSrc?.baseH && alignSrc.baseH > 0 ? alignSrc.baseH : containerSize.h
-    const src = alignSrc || { scaleX: 1, scaleY: 1, offX: 0, offY: 0 }
-    const clean = (v:number)=> (v>5? v/1000 : v)
-    const data: AlignJSON = {
-      scaleX: clean(src.scaleX),
-      scaleY: clean(src.scaleY),
-      offX: src.offX,
-      offY: src.offY,
-      baseW, baseH
-    }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'overlay-align.json'
-    a.click()
-    URL.revokeObjectURL(url)
-  }
-
-  // Charger SVG inline
+  // Charger le SVG inline (NON déformé)
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -179,7 +142,20 @@ export default function App() {
         const parser = new DOMParser()
         const doc = parser.parseFromString(text, 'image/svg+xml')
         const inlineSvg = doc.documentElement as unknown as SVGSVGElement
-        inlineSvg.setAttribute('preserveAspectRatio', 'none')
+
+        // Lire viewBox pour connaître la taille native
+        if (inlineSvg.viewBox && inlineSvg.viewBox.baseVal) {
+          const vb = inlineSvg.viewBox.baseVal
+          setNativeSize({ w: vb.width, h: vb.height })
+        } else {
+          // fallback: widths/height en attributs
+          const w = Number(inlineSvg.getAttribute('width')) || 0
+          const h = Number(inlineSvg.getAttribute('height')) || 0
+          setNativeSize({ w, h })
+        }
+
+        // IMPORTANT : on ne met PAS preserveAspectRatio="none"
+        inlineSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet')
         inlineSvg.style.width = '100%'
         inlineSvg.style.height = '100%'
 
@@ -189,22 +165,21 @@ export default function App() {
         wrap.appendChild(inlineSvg)
         svgRef.current = inlineSvg
 
+        // Rendre hex cliquables
         const polys = inlineSvg.querySelectorAll('polygon')
         polys.forEach((poly, index) => {
           poly.setAttribute('data-index', String(index))
-          poly.setAttribute('stroke-width', '1')
           ;(poly as SVGElement).style.cursor = 'pointer'
-          poly.addEventListener('mouseenter', () => poly.setAttribute('stroke-width', '2'))
-          poly.addEventListener('mouseleave', () => poly.setAttribute('stroke-width', '1'))
           poly.addEventListener('click', () => {
-            const currentRoom = state.roomId || ''
-            if (!currentRoom) return
-            if (mode === 'ping') socket.emit('selectCell', { roomId: currentRoom, index })
-            else socket.emit('setPawn', { roomId: currentRoom, index })
+            const rId = state.roomId || ''
+            if (!rId) return
+            if (mode === 'ping') socket.emit('selectCell', { roomId: rId, index })
+            else socket.emit('setPawn', { roomId: rId, index })
           })
         })
         setHexCount(polys.length)
 
+        // Centres natifs (dans le repère du SVG)
         const centers: Array<{cx:number, cy:number}> = []
         polys.forEach((poly) => {
           const box = (poly as SVGGraphicsElement).getBBox()
@@ -218,17 +193,60 @@ export default function App() {
     return () => { cancelled = true }
   }, [joined, mode])
 
+  // --- Calcul de l’échelle uniforme & offsets responsives ---
+
+  const { scaleU, effOffX, effOffY, warnAR } = useMemo(() => {
+    const baseW = nativeSize.w
+    const baseH = nativeSize.h
+    if (!baseW || !baseH || !containerSize.w || !containerSize.h) {
+      return { scaleU: 1, effOffX: 0, effOffY: 0, warnAR: false }
+    }
+    // facteur d’échelle théorique en largeur & hauteur
+    const kx = containerSize.w / baseW
+    const ky = containerSize.h / baseH
+    // on force une mise à l’échelle UNIFORME (pas de déformation)
+    const k = Math.min(kx, ky)
+    // si l’aspect-ratio diffère vraiment, on le signale en console (info)
+    const warn = Math.abs(kx - ky) > 0.02
+    const mult = alignSrc?.mult ?? 1
+    const offX = alignSrc?.offX ?? 0
+    const offY = alignSrc?.offY ?? 0
+    return {
+      scaleU: k * mult,
+      effOffX: offX * k,
+      effOffY: offY * k,
+      warnAR: warn
+    }
+  }, [nativeSize, containerSize, alignSrc])
+
+  useEffect(() => {
+    if (warnAR) {
+      console.info('[Heroes] Le ratio du conteneur diffère du SVG — l’échelle est uniformisée (pas de déformation).')
+    }
+  }, [warnAR])
+
+  // Transform appliqué au wrapper overlay (uniforme)
+  const overlayTransform = `translate(${effOffX}px, ${effOffY}px) scale(${scaleU})`
+
+  // Rendu initiales joueurs
+  function initialsForPlayer(players: Player[], id: string) {
+    const player = players.find(p => p.id === id)
+    if (!player || !player.name) return '•'
+    const parts = player.name.trim().split(/\s+/)
+    const init = (parts[0]?.[0] || '').toUpperCase() + (parts[1]?.[0] || '').toUpperCase()
+    return init || player.name[0].toUpperCase()
+  }
+
+  // Rendu
   const isMyTurn = useMemo(
     () => (state.currentPlayerId ?? null) !== null && state.currentPlayerId === mySocketId,
     [state.currentPlayerId, mySocketId]
   )
   const endTurn = () => (state.roomId || '') && socket.emit('endTurn', { roomId: state.roomId })
 
-  const overlayTransform = `translate(${effOffX}px, ${effOffY}px) scale(${effScaleX}, ${effScaleY})`
-
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16 }}>
-      <h1 style={{ marginTop: 0 }}>Heroes — Overlay SVG aligné & robuste</h1>
+      <h1 style={{ marginTop: 0 }}>Heroes — Overlay SVG 1:1 (sans déformation)</h1>
       <p>Socket: {connected ? '✅ connecté' : '❌ déconnecté'} · ID: {mySocketId || '...'}</p>
 
       {!joined ? (
@@ -245,9 +263,13 @@ export default function App() {
         <section style={{ display:'grid', gridTemplateColumns:'1fr 320px', gap:16, alignItems:'start' }}>
           {/* Plateau */}
           <div ref={containerRef} style={{ position:'relative', width:'100%', maxWidth: 1200 }}>
-            <img src="/assets/board.png" alt="Plateau" style={{ display:'block', width:'100%', height:'auto' }} />
+            <img
+              src="/assets/board.png"
+              alt="Plateau"
+              style={{ display:'block', width:'100%', height:'auto' }}
+            />
 
-            {/* Overlay transformé */}
+            {/* Overlay inline — mise à l’échelle UNIFORME + micro-offsets */}
             <div
               ref={overlayWrapRef}
               style={{
@@ -258,7 +280,7 @@ export default function App() {
               }}
             />
 
-            {/* Couches pions/pings alignées identiquement */}
+            {/* Marqueurs (pions + pings) dans le même repère (uniforme) */}
             <svg
               style={{
                 position:'absolute', inset:0,
@@ -288,7 +310,16 @@ export default function App() {
               {safeSelections(state.board).map(sel => {
                 const center = hexCenters[sel.index]
                 if (!center) return null
-                return <circle key={`ping-${sel.playerId}-${sel.index}`} cx={center.cx} cy={center.cy} r={6} fill={colorFor(sel.playerId)} opacity={0.8} />
+                return (
+                  <circle
+                    key={`ping-${sel.playerId}-${sel.index}`}
+                    cx={center.cx}
+                    cy={center.cy}
+                    r={6}
+                    fill={colorFor(sel.playerId)}
+                    opacity={0.8}
+                  />
+                )
               })}
             </svg>
           </div>
@@ -321,18 +352,16 @@ export default function App() {
                 <input type="radio" name="mode" checked={mode==='move'} onChange={()=>setMode('move')} />
                 Déplacer <b>mon pion</b>
               </label>
+              <p style={{ fontSize:12, color:'#666' }}>
+                Si un très léger décalage subsiste, utilise <code>offX/offY</code> dans <code>overlay-align.json</code>.
+                Tu peux aussi ajouter <code>"mult": 1.0</code> pour affiner l’échelle globale si besoin.
+              </p>
             </div>
 
             <div style={{ marginTop: 16 }}>
-              <h3>Alignement</h3>
-              <button onClick={exportAlignNormalized} style={{ padding:'6px 10px' }}>
-                Exporter l’alignement (normalisé)
-              </button>
-              <p style={{ fontSize:12, color:'#666', marginTop:8 }}>
-                Fichier inclut <code>baseW/baseH</code> pour un rendu identique sur tous les écrans.
-              </p>
+              <h3>Infos overlay</h3>
               <p style={{ fontSize:12, color:'#666' }}>
-                Hex détectés dans le SVG : <b>{hexCount}</b>
+                SVG détecté: <b>{nativeSize.w}×{nativeSize.h}</b> — Hex: <b>{hexCount}</b>
               </p>
             </div>
           </div>
@@ -340,12 +369,4 @@ export default function App() {
       )}
     </div>
   )
-}
-
-function initialsForPlayer(players: Player[], id: string) {
-  const player = players.find(p => p.id === id)
-  if (!player || !player.name) return '•'
-  const parts = player.name.trim().split(/\s+/)
-  const init = (parts[0]?.[0] || '').toUpperCase() + (parts[1]?.[0] || '').toUpperCase()
-  return init || player.name[0].toUpperCase()
 }
