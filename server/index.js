@@ -11,10 +11,10 @@ const PORT = process.env.PORT || 3000
 /**
  * Room:
  * - id
- * - players: Map<socketId, {id,name,seat}>
- * - order: string[] (ordre de tour)
+ * - players: Map<socketId, { id, name, seat, pa, ph, paMax, phMax }>
+ * - order: string[]
  * - turnIndex: number
- * - board: { selections: Map<socketId, { index:number }> } // index = polygon du SVG
+ * - board: { selections: Map<socketId,{index:number}>, pawns: Map<socketId,{index:number}> }
  */
 const rooms = new Map()
 
@@ -25,22 +25,32 @@ function getOrCreateRoom(roomId) {
       players: new Map(),
       order: [],
       turnIndex: 0,
-      board: { selections: new Map() },
+      board: { selections: new Map(), pawns: new Map() },
     })
   }
   return rooms.get(roomId)
+}
+
+function currentId(room) {
+  if (!room.order.length) return null
+  return room.order[room.turnIndex % room.order.length]
+}
+
+function startTurn(room) {
+  const id = currentId(room)
+  if (!id) return
+  const p = room.players.get(id)
+  if (p) p.pa = p.paMax // recharge PA au début du tour
 }
 
 function publicState(room) {
   return {
     roomId: room.id,
     players: Array.from(room.players.values()).sort((a, b) => a.seat - b.seat),
-    currentPlayerId: room.order.length ? room.order[room.turnIndex % room.order.length] : null,
+    currentPlayerId: currentId(room),
     board: {
-      selections: Array.from(room.board.selections.entries()).map(([playerId, v]) => ({
-        playerId,
-        index: v.index
-      }))
+      selections: Array.from(room.board.selections.entries()).map(([playerId, v]) => ({ playerId, index: v.index })),
+      pawns: Array.from(room.board.pawns.entries()).map(([playerId, v]) => ({ playerId, index: v.index })),
     }
   }
 }
@@ -68,9 +78,12 @@ io.on('connection', (socket) => {
 
       if (!room.players.has(socket.id)) {
         const seat = room.players.size + 1
-        room.players.set(socket.id, { id: socket.id, name, seat })
+        room.players.set(socket.id, { id: socket.id, name, seat, pa: 0, ph: 0, paMax: 4, phMax: 6 })
         room.order.push(socket.id)
-        if (room.order.length === 1) room.turnIndex = 0
+        if (room.order.length === 1) {
+          room.turnIndex = 0
+          startTurn(room)
+        }
       } else {
         room.players.get(socket.id).name = name
       }
@@ -78,18 +91,6 @@ io.on('connection', (socket) => {
     } catch (e) { console.error('joinRoom error', e) }
   })
 
-  socket.on('endTurn', ({ roomId }) => {
-    try {
-      const room = rooms.get(roomId)
-      if (!room || room.order.length === 0) return
-      const current = room.order[room.turnIndex % room.order.length]
-      if (current !== socket.id) return
-      room.turnIndex = (room.turnIndex + 1) % room.order.length
-      broadcast(roomId)
-    } catch (e) { console.error('endTurn error', e) }
-  })
-
-  // Nouvelle API: sélection par index de polygon du SVG
   socket.on('selectCell', ({ roomId, index }) => {
     try {
       const room = rooms.get(roomId)
@@ -101,24 +102,72 @@ io.on('connection', (socket) => {
     } catch (e) { console.error('selectCell error', e) }
   })
 
+  // Déplacer son pion — coûte 1 PA — uniquement au tour du joueur
+  socket.on('setPawn', ({ roomId, index }) => {
+    try {
+      const room = rooms.get(roomId)
+      if (!room) return
+      const idx = Number(index)
+      if (!Number.isInteger(idx) || idx < 0) return
+
+      const current = currentId(room)
+      if (current !== socket.id) return
+      const me = room.players.get(socket.id)
+      if (!me) return
+      if (me.pa <= 0) return
+
+      me.pa -= 1
+      room.board.pawns.set(socket.id, { index: idx })
+      broadcast(roomId)
+    } catch (e) { console.error('setPawn error', e) }
+  })
+
+  // Méditer : -1 PA -> +2 PH (jusqu’à phMax) — uniquement au tour du joueur
+  socket.on('meditate', ({ roomId }) => {
+    try {
+      const room = rooms.get(roomId)
+      if (!room) return
+      const current = currentId(room)
+      if (current !== socket.id) return
+      const me = room.players.get(socket.id)
+      if (!me) return
+      if (me.pa <= 0) return
+
+      me.pa -= 1
+      me.ph = Math.min(me.ph + 2, me.phMax)
+      broadcast(roomId)
+    } catch (e) { console.error('meditate error', e) }
+  })
+
+  socket.on('endTurn', ({ roomId }) => {
+    try {
+      const room = rooms.get(roomId)
+      if (!room || room.order.length === 0) return
+      const current = currentId(room)
+      if (current !== socket.id) return
+      room.turnIndex = (room.turnIndex + 1) % room.order.length
+      startTurn(room)
+      broadcast(roomId)
+    } catch (e) { console.error('endTurn error', e) }
+  })
+
   socket.on('disconnect', () => {
     for (const [roomId, room] of rooms.entries()) {
       if (!room.players.has(socket.id)) continue
 
-      const wasCurrent = room.order.length
-        ? room.order[room.turnIndex % room.order.length] === socket.id
-        : false
+      const wasCurrent = currentId(room) === socket.id
 
       room.players.delete(socket.id)
       room.board.selections.delete(socket.id)
+      room.board.pawns.delete(socket.id)
 
       const idx = room.order.indexOf(socket.id)
       if (idx !== -1) {
         room.order.splice(idx, 1)
         if (room.order.length === 0) { rooms.delete(roomId); continue }
-        if (idx < room.turnIndex) room.turnIndex -= 1
+        if (idx <= room.turnIndex && room.turnIndex > 0) room.turnIndex -= 1
         if (room.turnIndex >= room.order.length) room.turnIndex = 0
-        if (wasCurrent) { /* no-op, pointe déjà sur le suivant */ }
+        if (wasCurrent) startTurn(room)
       }
       broadcast(roomId)
     }
